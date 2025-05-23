@@ -118,7 +118,8 @@ def video_detect(
         replaceimg = None,
         keep_audio: bool = False,
         mosaicsize: int = 20,
-        disable_progress_output = False
+        disable_progress_output = False,
+        progress_callback=None
 ):
     try:
         if 'fps' in ffmpeg_config:
@@ -158,7 +159,7 @@ def video_detect(
             opath, format='FFMPEG', mode='I', **_ffmpeg_config
         )
 
-    for frame in read_iter:
+    for frame_idx, frame in enumerate(read_iter):
         # Perform network inference, get bb dets but discard landmark predictions
         dets, _ = centerface(frame, threshold=threshold)
 
@@ -177,6 +178,12 @@ def video_detect(
                 cv2.destroyAllWindows()
                 break
         bar.update()
+        if progress_callback is not None:
+            try:
+                progress_callback(frame_idx + 1)
+            except Exception as e:
+                print(f'Progress callback error: {e}')
+                break
     reader.close()
     if opath is not None:
         writer.close()
@@ -248,7 +255,8 @@ def get_anonymized_image(frame,
                          mask_scale: float,
                          ellipse: bool,
                          draw_scores: bool,
-                         replaceimg = None
+                         replaceimg = None,
+                         mosaicsize: int = 20
                          ):
     """
     Method for getting an anonymized image without CLI
@@ -261,7 +269,7 @@ def get_anonymized_image(frame,
     anonymize_frame(
         dets, frame, mask_scale=mask_scale,
         replacewith=replacewith, ellipse=ellipse, draw_scores=draw_scores,
-        replaceimg=replaceimg
+        replaceimg=replaceimg, mosaicsize=mosaicsize
     )
 
     return frame
