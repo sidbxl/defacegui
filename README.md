@@ -12,5 +12,5 @@ This app is intented to automaticaly anonymize faces in pictures and videos.
 ## Roadmap
 - Relases on Github Releases.
 - Binaries for Windows, MacOS and Linux.
-- Prettier UI, simpler UX.
+- Prettier UI, simpler UX (Hide advanced settings, default output folder, icons to replace English/French strings of text, warn the user for files that might give issues,...)
 - Hardware acceleration.
