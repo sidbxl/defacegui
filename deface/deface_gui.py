@@ -212,39 +212,63 @@ class HardwareSetupDialog(QDialog):
     def detect_hardware(self):
         os_name = platform.system()
         self.info_label.setText(f'OS: {os_name}\n')
+        gpu_info = "Could not detect specific GPU."
+        recommended_backend = None
 
         if os_name == 'Windows':
-            # TODO: Add GPU detection for Windows
-            self.recommend_backend('directml')
+            try:
+                wmic_output = subprocess.check_output('wmic path win32_VideoController get name', text=True)
+                if 'NVIDIA' in wmic_output:
+                    gpu_info = "NVIDIA GPU detected."
+                    recommended_backend = 'cuda'
+                elif 'AMD' in wmic_output or 'Advanced Micro Devices' in wmic_output:
+                    gpu_info = "AMD GPU detected."
+                    recommended_backend = 'directml' # DirectML is generally a safer bet on Windows for AMD
+                else:
+                    gpu_info = "Generic GPU detected."
+                    recommended_backend = 'directml'
+            except (FileNotFoundError, subprocess.CalledProcessError):
+                # wmic might not be in path or might fail
+                recommended_backend = 'directml'
+
         elif os_name == 'Linux':
             try:
                 lspci_output = subprocess.check_output('lspci', text=True)
                 if 'NVIDIA' in lspci_output:
-                    self.recommend_backend('cuda')
+                    gpu_info = "NVIDIA GPU detected."
+                    recommended_backend = 'cuda'
                 elif 'AMD' in lspci_output or 'Advanced Micro Devices' in lspci_output:
-                    self.recommend_backend('rocm')
-                else:
-                    self.info_label.setText('No compatible hardware acceleration found.')
-                    self.install_button.setEnabled(False)
+                    gpu_info = "AMD GPU detected."
+                    recommended_backend = 'rocm'
             except FileNotFoundError:
-                self.info_label.setText('lspci not found. Cannot detect GPU.')
-                self.install_button.setEnabled(False)
+                gpu_info = "lspci not found. Cannot detect GPU."
+
+
         elif os_name == 'Darwin':
-            self.recommend_backend('coreml')
+            gpu_info = "Apple Silicon or AMD GPU detected."
+            recommended_backend = 'coreml'
+
+        if recommended_backend:
+            self.info_label.setText(f'OS: {os_name}\nGPU: {gpu_info}')
+            self.recommend_backend(recommended_backend)
         else:
-            self.info_label.setText('No compatible hardware acceleration found.')
+            self.info_label.setText(f'OS: {os_name}\nGPU: {gpu_info}\n\nNo specific hardware acceleration backend could be recommended. The application will fall back to using the CPU, which might be slow.')
             self.install_button.setEnabled(False)
 
     def recommend_backend(self, backend):
-        self.info_label.setText(f'{self.info_label.text()}Recommended backend: {backend}')
-        self.install_button.setText(f'Install {backend} backend')
+        self.info_label.setText(f'{self.info_label.text()}\n\nRecommended backend: \'{backend}\'\nClick below to install the required package.')
+        self.install_button.setText(f'Install onnxruntime-{backend} package')
         self.backend_to_install = backend
 
     def install_backend(self):
         self.install_button.setEnabled(False)
         self.progress_bar.setRange(0, 0)  # Indeterminate progress
 
-        self.worker = PipInstallWorker(self.backend_to_install)
+        package_name = f'onnxruntime-{self.backend_to_install.lower()}'
+        if self.backend_to_install == 'cuda':
+            package_name = 'onnxruntime-gpu'
+
+        self.worker = PipInstallWorker(package_name, self.backend_to_install)
         self.worker.finished.connect(self.on_install_finished)
         self.worker.start()
 
@@ -252,22 +276,23 @@ class HardwareSetupDialog(QDialog):
         self.progress_bar.setRange(0, 1)  # Stop indeterminate progress
         self.progress_bar.setValue(1)
         if success:
-            QMessageBox.information(self, 'Success', f'{self.backend_to_install} backend installed successfully. Please restart the application.')
+            QMessageBox.information(self, 'Success', f'The {self.backend_to_install} backend package was installed successfully. Please restart the application to use it.')
             self.accept()
         else:
-            QMessageBox.critical(self, 'Error', f'Failed to install {self.backend_to_install} backend:\n{message}')
+            QMessageBox.critical(self, 'Error', f'Failed to install the {self.backend_to_install} backend package.\n\nReason: {message}\n\nPlease try installing it manually or use the CPU fallback.')
             self.install_button.setEnabled(True)
 
 class PipInstallWorker(QThread):
     finished = pyqtSignal(bool, str)
 
-    def __init__(self, backend, parent=None):
+    def __init__(self, package_name, backend_name, parent=None):
         super().__init__(parent)
-        self.backend = backend
+        self.package_name = package_name
+        self.backend_name = backend_name
 
     def run(self):
         try:
-            subprocess.check_call([sys.executable, '-m', 'pip', 'install', f'deface[{self.backend}]'])
+            subprocess.check_call([sys.executable, '-m', 'pip', 'install', self.package_name])
             self.finished.emit(True, '')
         except subprocess.CalledProcessError as e:
             self.finished.emit(False, str(e))
