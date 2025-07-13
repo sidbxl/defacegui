@@ -1,6 +1,7 @@
 import sys
 import os
 import numpy as np
+import onnxruntime
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QFileDialog,
     QListWidget, QCheckBox, QComboBox, QLineEdit, QProgressBar, QGroupBox, QMessageBox, QListWidgetItem, QDialog, QSpinBox, QDoubleSpinBox, QSizePolicy, QFrame
@@ -9,7 +10,9 @@ from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QPixmap, QImage
 import imageio
 import cv2
-from deface.deface_main import get_anonymized_image, get_file_type, video_detect
+import platform
+import subprocess
+from deface.utils import get_anonymized_image, get_file_type, video_detect
 from deface.centerface import CenterFace
 
 if getattr(sys, 'frozen', False):
@@ -121,7 +124,7 @@ class Worker(QThread):
                         self.file_done.emit(file_path, out_path, True)
                     elif filetype == 'video':
                         try:
-                            centerface = CenterFace(in_shape=None, backend=self.settings['backend'], override_execution_provider=self.settings['exec_provider'] or None)
+                            centerface = CenterFace(in_shape=None, backend='onnxrt', override_execution_provider=self.settings['exec_provider'] or None)
                         except Exception as e:
                             if 'onnxruntime' in str(e) or 'DLL load failed' in str(e):
                                 self.error.emit('ONNX Runtime error: GPU/onnxrt mode is not available. Please check your CUDA/cuDNN/onnxruntime-gpu installation or use CPU mode.')
@@ -187,6 +190,88 @@ class Worker(QThread):
         self._is_running = False
         self._cancel_current = True
 
+class HardwareSetupDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('Hardware Setup')
+        self.layout = QVBoxLayout()
+        self.setLayout(self.layout)
+
+        self.info_label = QLabel()
+        self.layout.addWidget(self.info_label)
+
+        self.install_button = QPushButton()
+        self.install_button.clicked.connect(self.install_backend)
+        self.layout.addWidget(self.install_button)
+
+        self.progress_bar = QProgressBar()
+        self.layout.addWidget(self.progress_bar)
+
+        self.detect_hardware()
+
+    def detect_hardware(self):
+        os_name = platform.system()
+        self.info_label.setText(f'OS: {os_name}\n')
+
+        if os_name == 'Windows':
+            # TODO: Add GPU detection for Windows
+            self.recommend_backend('directml')
+        elif os_name == 'Linux':
+            try:
+                lspci_output = subprocess.check_output('lspci', text=True)
+                if 'NVIDIA' in lspci_output:
+                    self.recommend_backend('cuda')
+                elif 'AMD' in lspci_output or 'Advanced Micro Devices' in lspci_output:
+                    self.recommend_backend('rocm')
+                else:
+                    self.info_label.setText('No compatible hardware acceleration found.')
+                    self.install_button.setEnabled(False)
+            except FileNotFoundError:
+                self.info_label.setText('lspci not found. Cannot detect GPU.')
+                self.install_button.setEnabled(False)
+        elif os_name == 'Darwin':
+            self.recommend_backend('coreml')
+        else:
+            self.info_label.setText('No compatible hardware acceleration found.')
+            self.install_button.setEnabled(False)
+
+    def recommend_backend(self, backend):
+        self.info_label.setText(f'{self.info_label.text()}Recommended backend: {backend}')
+        self.install_button.setText(f'Install {backend} backend')
+        self.backend_to_install = backend
+
+    def install_backend(self):
+        self.install_button.setEnabled(False)
+        self.progress_bar.setRange(0, 0)  # Indeterminate progress
+
+        self.worker = PipInstallWorker(self.backend_to_install)
+        self.worker.finished.connect(self.on_install_finished)
+        self.worker.start()
+
+    def on_install_finished(self, success, message):
+        self.progress_bar.setRange(0, 1)  # Stop indeterminate progress
+        self.progress_bar.setValue(1)
+        if success:
+            QMessageBox.information(self, 'Success', f'{self.backend_to_install} backend installed successfully. Please restart the application.')
+            self.accept()
+        else:
+            QMessageBox.critical(self, 'Error', f'Failed to install {self.backend_to_install} backend:\n{message}')
+            self.install_button.setEnabled(True)
+
+class PipInstallWorker(QThread):
+    finished = pyqtSignal(bool, str)
+
+    def __init__(self, backend, parent=None):
+        super().__init__(parent)
+        self.backend = backend
+
+    def run(self):
+        try:
+            subprocess.check_call([sys.executable, '-m', 'pip', 'install', f'deface[{self.backend}]'])
+            self.finished.emit(True, '')
+        except subprocess.CalledProcessError as e:
+            self.finished.emit(False, str(e))
+
 class DefaceGUIMain(QWidget):
     def __init__(self):
         super().__init__()
@@ -196,7 +281,12 @@ class DefaceGUIMain(QWidget):
         self.backend_label = QLabel()
         self.cancelled = False
         self.init_ui()
-        self.detect_backend()
+        self.populate_execution_providers()
+
+    def open_hardware_setup(self):
+        dialog = HardwareSetupDialog(self)
+        dialog.exec_()
+
 
     def init_ui(self):
         main_layout = QVBoxLayout()
@@ -250,11 +340,7 @@ class DefaceGUIMain(QWidget):
         self.erase_metadata_checkbox.setChecked(True)
         self.remove_after_checkbox = QCheckBox('Remove files from list after processing')
         self.remove_after_checkbox.setChecked(True)
-        self.backend_combo = QComboBox()
-        self.backend_combo.addItems(['auto', 'onnxrt', 'opencv'])
-        self.backend_combo.currentTextChanged.connect(self.update_backend_label)
-        self.exec_provider_edit = QLineEdit()
-        self.exec_provider_edit.setPlaceholderText('Execution provider (optional)')
+        self.execution_provider_combo = QComboBox()
 
         settings_layout.addWidget(QLabel('Mask Type:'))
         settings_layout.addWidget(self.mask_type_combo)
@@ -270,9 +356,8 @@ class DefaceGUIMain(QWidget):
         settings_layout.addLayout(mosaic_hbox)
         settings_layout.addWidget(self.erase_metadata_checkbox)
         settings_layout.addWidget(self.remove_after_checkbox)
-        settings_layout.addWidget(QLabel('Backend:'))
-        settings_layout.addWidget(self.backend_combo)
-        settings_layout.addWidget(self.exec_provider_edit)
+        settings_layout.addWidget(QLabel('Hardware Acceleration:'))
+        settings_layout.addWidget(self.execution_provider_combo)
 
         # Advanced settings toggle
         self.advanced_group = QGroupBox('Advanced Settings')
@@ -282,6 +367,11 @@ class DefaceGUIMain(QWidget):
         middle_col.addWidget(self.advanced_group)
         self.advanced_group.toggled.connect(self.toggle_advanced_settings)
         self.toggle_advanced_settings(False)
+
+        hardware_setup_btn = QPushButton('Hardware Setup')
+        hardware_setup_btn.clicked.connect(self.open_hardware_setup)
+        middle_col.addWidget(hardware_setup_btn)
+
         middle_col.addWidget(self.backend_label)
         middle_col.addStretch(1)
 
@@ -339,23 +429,33 @@ class DefaceGUIMain(QWidget):
     def on_mask_type_changed(self, text):
         self.mosaic_spin.setEnabled(text.lower() == 'mosaic')
 
-    def detect_backend(self):
-        try:
-            backend = self.backend_combo.currentText()
-            exec_provider = self.exec_provider_edit.text() or None
-            centerface = CenterFace(in_shape=None, backend=backend, override_execution_provider=exec_provider)
-            if centerface.backend == 'onnxrt' and hasattr(centerface, 'sess'):
-                provider = centerface.sess.get_providers()[0]
-                self.backend_label.setText(f'Backend: ONNX Runtime (GPU mode: {provider})')
-            elif centerface.backend == 'opencv':
-                self.backend_label.setText('Backend: OpenCV (CPU mode)')
-            else:
-                self.backend_label.setText(f'Backend: {centerface.backend}')
-        except Exception as e:
-            self.backend_label.setText(f'Backend: Error ({e})')
+    def populate_execution_providers(self):
+        self.execution_provider_combo.clear()
+        available_providers = onnxruntime.get_available_providers()
+        # Add CPU provider first as a fallback
+        self.execution_provider_combo.addItem('CPU', 'CPUExecutionProvider')
 
-    def update_backend_label(self):
-        self.detect_backend()
+        provider_map = {
+            'CUDAExecutionProvider': 'NVIDIA CUDA',
+            'DmlExecutionProvider': 'DirectML',
+            'ROCmExecutionProvider': 'AMD ROCm',
+            'CoreMLExecutionProvider': 'Apple CoreML',
+            'OpenVINOExecutionProvider': 'Intel OpenVINO'
+        }
+
+        for provider in available_providers:
+            if provider in provider_map:
+                self.execution_provider_combo.addItem(provider_map[provider], provider)
+
+        # Set a sensible default
+        if 'CUDAExecutionProvider' in available_providers:
+            self.execution_provider_combo.setCurrentText('NVIDIA CUDA')
+        elif 'DmlExecutionProvider' in available_providers:
+            self.execution_provider_combo.setCurrentText('DirectML')
+        elif 'ROCmExecutionProvider' in available_providers:
+            self.execution_provider_combo.setCurrentText('AMD ROCm')
+        elif 'CoreMLExecutionProvider' in available_providers:
+            self.execution_provider_combo.setCurrentText('Apple CoreML')
 
     def add_files(self):
         files, _ = QFileDialog.getOpenFileNames(self, 'Select Images or Videos', '',
@@ -395,8 +495,7 @@ class DefaceGUIMain(QWidget):
             'keep_audio': self.keep_audio_checkbox.isChecked(),
             'erase_metadata': self.erase_metadata_checkbox.isChecked(),
             'remove_after': self.remove_after_checkbox.isChecked(),
-            'backend': self.backend_combo.currentText(),
-            'exec_provider': self.exec_provider_edit.text() or None,
+            'exec_provider': self.execution_provider_combo.currentData(),
         }
         self.worker = Worker(files, out_dir, settings, self)
         self.worker.progress_update.connect(self.on_progress_update)

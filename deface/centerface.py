@@ -20,7 +20,7 @@ def ensure_rgb(img: np.ndarray) -> np.ndarray:
 
 
 class CenterFace:
-    def __init__(self, onnx_path=None, in_shape=None, backend='auto', override_execution_provider=None):
+    def __init__(self, onnx_path=None, in_shape=None, override_execution_provider=None):
         self.in_shape = in_shape
         self.onnx_input_name = 'input.1'
         self.onnx_output_names = ['537', '538', '539', '540']
@@ -28,47 +28,27 @@ class CenterFace:
         if onnx_path is None:
             onnx_path = default_onnx_path
 
-        if backend == 'auto':
-            try:
-                import onnx
-                import onnxruntime
-                backend = 'onnxrt'
-            except:
-                # TODO: Warn when using a --verbose flag
-                # print('Failed to import onnx or onnxruntime. Falling back to slower OpenCV backend.')
-                backend = 'opencv'
-        self.backend = backend
+        import onnx
+        import onnxruntime
 
+        # Silence warnings about unnecessary bn initializers
+        onnxruntime.set_default_logger_severity(3)
 
-        if self.backend == 'opencv':
-            self.net = cv2.dnn.readNetFromONNX(onnx_path)
-        elif self.backend == 'onnxrt':
-            import onnx
-            import onnxruntime
+        static_model = onnx.load(onnx_path)
+        dyn_model = self.dynamicize_shapes(static_model)
 
-            # Silence warnings about unnecessary bn initializers
-            onnxruntime.set_default_logger_severity(3)
+        available_providers = onnxruntime.get_available_providers()
+        if override_execution_provider is None:
+            ort_providers = available_providers
+        else:
+            if override_execution_provider not in available_providers:
+                raise ValueError(f'{override_execution_provider=} not found. Available providers are: {available_providers}')
+            ort_providers = [override_execution_provider]
 
-            static_model = onnx.load(onnx_path)
-            dyn_model = self.dynamicize_shapes(static_model)
+        self.sess = onnxruntime.InferenceSession(dyn_model.SerializeToString(), providers=ort_providers)
 
-            # onnxruntime.get_available_providers() Returns a list of all
-            #  available providers in a reasonable ordering (GPU providers
-            #  first, then accelerated CPU providers like OpenVINO, then
-            #  CPUExecutionProvider as the last choice).
-            #  In normal conditions, overriding this choice won't be necessary.
-            available_providers = onnxruntime.get_available_providers()
-            if override_execution_provider is None:
-                ort_providers = available_providers
-            else:
-                if override_execution_provider not in available_providers:
-                    raise ValueError(f'{override_execution_provider=} not found. Available providers are: {available_providers}')
-                ort_providers = [override_execution_provider]
-
-            self.sess = onnxruntime.InferenceSession(dyn_model.SerializeToString(), providers=ort_providers)
-
-            preferred_provider = self.sess.get_providers()[0]
-            print(f'Running on {preferred_provider}.')
+        preferred_provider = self.sess.get_providers()[0]
+        print(f'Running on {preferred_provider}.')
 
     @staticmethod
     def dynamicize_shapes(static_model):
@@ -104,13 +84,7 @@ class CenterFace:
             img, scalefactor=1.0, size=(w_new, h_new),
             mean=(0, 0, 0), swapRB=False, crop=False
         )
-        if self.backend == 'opencv':
-            self.net.setInput(blob)
-            heatmap, scale, offset, lms = self.net.forward(self.onnx_output_names)
-        elif self.backend == 'onnxrt':
-            heatmap, scale, offset, lms = self.sess.run(self.onnx_output_names, {self.onnx_input_name: blob})
-        else:
-            raise RuntimeError(f'Unknown backend {self.backend}')
+        heatmap, scale, offset, lms = self.sess.run(self.onnx_output_names, {self.onnx_input_name: blob})
         dets, lms = self.decode(heatmap, scale, offset, lms, (h_new, w_new), threshold=threshold)
         if len(dets) > 0:
             dets[:, 0:4:2], dets[:, 1:4:2] = dets[:, 0:4:2] / scale_w, dets[:, 1:4:2] / scale_h

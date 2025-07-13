@@ -22,12 +22,14 @@ dependencies = [
     "numpy",
     "tqdm",
     "scikit-image",
-    "opencv-python",
+    "opencv-python-headless",
 ]
 
 [project.optional-dependencies]
-cuda = ["onnx", "onnxruntime-cuda"]
+cuda = ["onnx", "onnxruntime-gpu"]
 directml = ["onnx", "onnxruntime-directml"]
+rocm = ["onnx", "onnxruntime-rocm"]
+coreml = ["onnx", "onnxruntime-coreml"]
 openvino = ["onnx", "onnxruntime-openvino"]
 
 [project.scripts]
